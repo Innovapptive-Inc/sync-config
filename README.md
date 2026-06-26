@@ -44,7 +44,7 @@ A production-quality, user-friendly Next.js application that allows non-technica
 
 2. **Set Up Environment**
    ```bash
-   cp .env.example .env.local
+   cp .env.local
    ```
 
 3. **Configure MongoDB**
