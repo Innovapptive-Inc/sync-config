@@ -2,9 +2,10 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { ENVIRONMENTS } from '@/lib/environments';
 
 export default function SnapshotsPage() {
-  const [domain, setDomain] = useState('');
+  const [domain, setDomain] = useState(ENVIRONMENTS[0]);
   const [snapshots, setSnapshots] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -318,26 +319,30 @@ export default function SnapshotsPage() {
           <form onSubmit={handleFetch} className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
             <div className="flex-1 w-full">
               <label htmlFor="domain" className="block text-sm font-medium text-gray-700 mb-2">
-                Domain
+                Environment
               </label>
               <div className="flex items-center">
                 <span className="inline-flex items-center px-3 py-2 rounded-l-lg border border-r-0 border-gray-300 bg-gray-50 text-gray-500 text-sm">
                   https://
                 </span>
-                <input
+                <select
                   id="domain"
-                  type="text"
                   value={domain}
                   onChange={(e) => setDomain(e.target.value)}
-                  placeholder="cwp-merge-qa"
-                  className="flex-1 px-4 py-2 border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm text-gray-900"
-                />
+                  className="flex-1 px-4 py-2 border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm text-gray-900 bg-white"
+                >
+                  {ENVIRONMENTS.map((env) => (
+                    <option key={env} value={env}>
+                      {env}
+                    </option>
+                  ))}
+                </select>
                 <span className="inline-flex items-center px-3 py-2 rounded-r-lg border border-l-0 border-gray-300 bg-gray-50 text-gray-500 text-sm">
                   .innovapptive.com
                 </span>
               </div>
               <p className="mt-1 text-xs text-gray-500">
-                Enter the subdomain (e.g., <code className="bg-gray-100 px-1 rounded">cwp-merge-qa</code>)
+                Select the environment to use its X-API key
               </p>
             </div>
             <button

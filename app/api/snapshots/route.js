@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getXApiKeys } from '@/lib/xapiKeys';
 
 // POST - Proxy the snapshot list request to the external API
 export async function POST(request) {
@@ -12,9 +13,17 @@ export async function POST(request) {
       );
     }
 
-    // Build the URL from the user-provided domain
+    const keys = getXApiKeys(domain);
+    if (!keys) {
+      return NextResponse.json(
+        { success: false, message: `Unknown environment: ${domain}` },
+        { status: 400 }
+      );
+    }
+
+    // Build the URL from the selected environment's domain
     const url = `https://${domain}.innovapptive.com/mobilesyncapi/snapshot/list`;
-    const snapShotListApi = process.env.SNAPSHOT_XAPI_KEY;
+    const snapShotListApi = keys.snapshotKey;
 
     const response = await fetch(url, {
       method: 'POST',
