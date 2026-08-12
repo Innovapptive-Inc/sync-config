@@ -1,13 +1,84 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { ENVIRONMENTS } from '@/lib/environments';
+
+const ACTIVE_STATUSES = ['in_progress', 'running', 'processing', 'pending', 'queued'];
+const POLL_INTERVAL_MS = 5000;
+const CUSTOM_ENV_STORAGE_KEY = 'sync-config-custom-environments';
+
+function getSnapshotItems(snapshots) {
+  if (!snapshots) return [];
+  const items = Array.isArray(snapshots)
+    ? snapshots
+    : snapshots.items || snapshots.data || snapshots.snapshots || [];
+  return Array.isArray(items) ? items : [];
+}
 
 export default function SnapshotsPage() {
   const [domain, setDomain] = useState(ENVIRONMENTS[0]);
   const [snapshots, setSnapshots] = useState(null);
+  const [snapshotsDomain, setSnapshotsDomain] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState(null);
   const [error, setError] = useState(null);
+  const domainRef = useRef(domain);
+  useEffect(() => {
+    domainRef.current = domain;
+  }, [domain]);
+
+  // Custom environments (domain + x-api-key) added by the user, persisted in localStorage
+  const [customEnvs, setCustomEnvs] = useState(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const stored = JSON.parse(localStorage.getItem(CUSTOM_ENV_STORAGE_KEY) || '[]');
+      return Array.isArray(stored) ? stored : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showAddEnv, setShowAddEnv] = useState(false);
+  const [newEnvDomain, setNewEnvDomain] = useState('');
+  const [newEnvApiKey, setNewEnvApiKey] = useState('');
+  const [addEnvError, setAddEnvError] = useState(null);
+  const customEnvsRef = useRef(customEnvs);
+  useEffect(() => {
+    customEnvsRef.current = customEnvs;
+  }, [customEnvs]);
+
+  const persistCustomEnvs = (next) => {
+    setCustomEnvs(next);
+    localStorage.setItem(CUSTOM_ENV_STORAGE_KEY, JSON.stringify(next));
+  };
+
+  const handleAddEnv = (e) => {
+    e.preventDefault();
+    const newDomain = newEnvDomain.trim().toLowerCase();
+    const newApiKey = newEnvApiKey.trim();
+
+    if (!newDomain || !newApiKey) {
+      setAddEnvError('Domain and X-API key are required');
+      return;
+    }
+    if (ENVIRONMENTS.includes(newDomain) || customEnvs.some((env) => env.domain === newDomain)) {
+      setAddEnvError('This environment already exists');
+      return;
+    }
+
+    persistCustomEnvs([...customEnvs, { domain: newDomain, apiKey: newApiKey }]);
+    setDomain(newDomain);
+    setNewEnvDomain('');
+    setNewEnvApiKey('');
+    setAddEnvError(null);
+    setShowAddEnv(false);
+  };
+
+  const handleRemoveEnv = (envDomain) => {
+    persistCustomEnvs(customEnvs.filter((env) => env.domain !== envDomain));
+    if (domain === envDomain) setDomain(ENVIRONMENTS[0]);
+  };
 
   // Bootstrap state
   const [isCascade, setIsCascade] = useState(true);
@@ -15,24 +86,32 @@ export default function SnapshotsPage() {
   const [bootstrapLoading, setBootstrapLoading] = useState(false);
   const [bootstrapResult, setBootstrapResult] = useState(null);
   const [bootstrapError, setBootstrapError] = useState(null);
+  // Domains where we triggered a bootstrap and are waiting for it to finish
+  const [runningBootstraps, setRunningBootstraps] = useState({});
 
-  const handleFetch = async (e) => {
-    e.preventDefault();
+  // A running bootstrap is a 'full' type snapshot job. Trust the flag until a fresh
+  // snapshot fetch for this domain proves it's no longer active.
+  const hasFreshSnapshotsForDomain = snapshotsDomain === domain;
+  const activeFullJob = hasFreshSnapshotsForDomain
+    && getSnapshotItems(snapshots).some(
+      (s) => s.type?.toLowerCase() === 'full' && ACTIVE_STATUSES.includes(s.status?.toLowerCase())
+    );
+  const bootstrapRunning = Boolean(runningBootstraps[domain]) && (!hasFreshSnapshotsForDomain || activeFullJob);
 
-    if (!domain.trim()) {
-      setError('Please enter a domain');
-      return;
+  const fetchSnapshots = useCallback(async (targetDomain, apiKey, { silent } = {}) => {
+    if (silent) {
+      setPolling(true);
+    } else {
+      setLoading(true);
+      setSnapshots(null);
     }
-
-    setLoading(true);
     setError(null);
-    setSnapshots(null);
 
     try {
       const res = await fetch('/api/snapshots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: domain.trim() }),
+        body: JSON.stringify({ domain: targetDomain.trim(), ...(apiKey ? { apiKey } : {}) }),
       });
 
       const result = await res.json();
@@ -43,12 +122,43 @@ export default function SnapshotsPage() {
       }
 
       setSnapshots(result.data);
+      setSnapshotsDomain(targetDomain);
+      setLastUpdated(new Date());
     } catch (err) {
       setError(err.message || 'Network error');
     } finally {
       setLoading(false);
+      setPolling(false);
     }
+  }, []);
+
+  const handleFetch = (e) => {
+    e.preventDefault();
+
+    if (!domain.trim()) {
+      setError('Please enter a domain');
+      return;
+    }
+
+    const customEnv = customEnvs.find((env) => env.domain === domain);
+    fetchSnapshots(domain, customEnv?.apiKey);
   };
+
+  // Poll while any snapshot is still in progress, so status updates without manual re-fetching
+  useEffect(() => {
+    if (!autoRefresh) return;
+
+    const items = getSnapshotItems(snapshots);
+    const hasActive = items.some((s) => ACTIVE_STATUSES.includes(s.status?.toLowerCase()));
+    if (!hasActive) return;
+
+    const interval = setInterval(() => {
+      const customEnv = customEnvsRef.current.find((env) => env.domain === domainRef.current);
+      fetchSnapshots(domainRef.current, customEnv?.apiKey, { silent: true });
+    }, POLL_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [snapshots, autoRefresh, fetchSnapshots]);
 
   // Bootstrap handlers
   const addPlantId = () => {
@@ -74,6 +184,11 @@ export default function SnapshotsPage() {
       return;
     }
 
+    if (bootstrapRunning) {
+      setBootstrapError(`A bootstrap is already running for ${domain}. Wait for it to finish before triggering another.`);
+      return;
+    }
+
     const validPlantIds = plantIds.filter((id) => id.trim() !== '');
     if (validPlantIds.length === 0) {
       setBootstrapError('Please add at least one Plant ID');
@@ -85,6 +200,8 @@ export default function SnapshotsPage() {
     setBootstrapResult(null);
 
     try {
+      const customEnv = customEnvs.find((env) => env.domain === domain);
+      const apiKey = customEnv?.apiKey;
       const res = await fetch('/api/bootstrap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -92,6 +209,7 @@ export default function SnapshotsPage() {
           domain: domain.trim(),
           isCascade,
           plantIds: validPlantIds,
+          ...(apiKey ? { apiKey } : {}),
         }),
       });
 
@@ -104,6 +222,9 @@ export default function SnapshotsPage() {
       }
 
       setBootstrapResult(result.data);
+      setRunningBootstraps((prev) => ({ ...prev, [domain]: true }));
+      // Kick off status tracking so the UI knows when this bootstrap completes
+      fetchSnapshots(domain, apiKey, { silent: true });
     } catch (err) {
       setBootstrapError(err.message || 'Network error');
     } finally {
@@ -156,10 +277,7 @@ export default function SnapshotsPage() {
   const renderSnapshots = () => {
     if (!snapshots) return null;
 
-    // Handle both array responses and object with items/data array
-    const items = Array.isArray(snapshots)
-      ? snapshots
-      : snapshots.items || snapshots.data || snapshots.snapshots || [];
+    const items = getSnapshotItems(snapshots);
 
     if (Array.isArray(items) && items.length === 0) {
       return (
@@ -219,11 +337,38 @@ export default function SnapshotsPage() {
 
         {/* Snapshot cards */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="px-6 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-900">
-              Snapshot List
-            </h3>
-            <span className="text-sm text-gray-500">{items.length} record{items.length !== 1 ? 's' : ''}</span>
+          <div className="px-6 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Snapshot List
+              </h3>
+              {polling && (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600">
+                  <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Refreshing…
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-4">
+              {lastUpdated && (
+                <span className="text-xs text-gray-400">
+                  Updated {lastUpdated.toLocaleTimeString()}
+                </span>
+              )}
+              <label className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(e) => setAutoRefresh(e.target.checked)}
+                  className="h-3.5 w-3.5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                />
+                Auto-refresh
+              </label>
+              <span className="text-sm text-gray-500">{items.length} record{items.length !== 1 ? 's' : ''}</span>
+            </div>
           </div>
 
           <div className="divide-y divide-gray-100">
@@ -306,9 +451,18 @@ export default function SnapshotsPage() {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
           <form onSubmit={handleFetch} className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
             <div className="flex-1 w-full">
-              <label htmlFor="domain" className="block text-sm font-medium text-gray-700 mb-2">
-                Environment
-              </label>
+              <div className="flex items-center justify-between mb-2">
+                <label htmlFor="domain" className="block text-sm font-medium text-gray-700">
+                  Environment
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowAddEnv((v) => !v)}
+                  className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                >
+                  {showAddEnv ? 'Cancel' : '+ Add environment'}
+                </button>
+              </div>
               <div className="flex items-center">
                 <span className="inline-flex items-center px-3 py-2 rounded-l-lg border border-r-0 border-gray-300 bg-gray-50 text-gray-500 text-sm">
                   https://
@@ -324,14 +478,75 @@ export default function SnapshotsPage() {
                       {env}
                     </option>
                   ))}
+                  {customEnvs.length > 0 && (
+                    <optgroup label="Custom">
+                      {customEnvs.map((env) => (
+                        <option key={env.domain} value={env.domain}>
+                          {env.domain}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
                 <span className="inline-flex items-center px-3 py-2 rounded-r-lg border border-l-0 border-gray-300 bg-gray-50 text-gray-500 text-sm">
                   .innovapptive.com
                 </span>
+                {customEnvs.some((env) => env.domain === domain) && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveEnv(domain)}
+                    className="ml-2 p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                    aria-label="Remove custom environment"
+                    title="Remove custom environment"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                )}
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 Select the environment to use its X-API key
               </p>
+
+              {showAddEnv && (
+                <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
+                  <div>
+                    <label htmlFor="newEnvDomain" className="block text-xs font-medium text-gray-700 mb-1">
+                      Domain name
+                    </label>
+                    <input
+                      id="newEnvDomain"
+                      type="text"
+                      value={newEnvDomain}
+                      onChange={(e) => setNewEnvDomain(e.target.value)}
+                      placeholder="e.g. my-new-env"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm text-gray-900"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="newEnvApiKey" className="block text-xs font-medium text-gray-700 mb-1">
+                      X-API key
+                    </label>
+                    <input
+                      id="newEnvApiKey"
+                      type="password"
+                      value={newEnvApiKey}
+                      onChange={(e) => setNewEnvApiKey(e.target.value)}
+                      placeholder="X-API key for this environment"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm text-gray-900 font-mono"
+                    />
+                  </div>
+                  {addEnvError && <p className="text-xs text-red-600">{addEnvError}</p>}
+                  <button
+                    type="button"
+                    onClick={handleAddEnv}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    Save environment
+                  </button>
+                </div>
+              )}
             </div>
             <button
               type="submit"
@@ -434,7 +649,7 @@ export default function SnapshotsPage() {
             <div className="pt-2">
               <button
                 type="submit"
-                disabled={bootstrapLoading || !domain.trim()}
+                disabled={bootstrapLoading || !domain.trim() || bootstrapRunning}
                 className="inline-flex items-center gap-2 px-6 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {bootstrapLoading ? (
@@ -456,6 +671,15 @@ export default function SnapshotsPage() {
               </button>
               {!domain.trim() && (
                 <p className="mt-1.5 text-xs text-amber-600">Enter a domain above to enable this action</p>
+              )}
+              {bootstrapRunning && (
+                <p className="mt-1.5 text-xs text-amber-600 inline-flex items-center gap-1.5">
+                  <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Bootstrap already running for {domain} — waiting for it to complete
+                </p>
               )}
             </div>
           </form>

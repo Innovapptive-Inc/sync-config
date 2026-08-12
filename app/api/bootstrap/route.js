@@ -4,7 +4,7 @@ import { getXApiKeys } from '@/lib/xapiKeys';
 // POST - Trigger BASE_MASTER bootstrap dump
 export async function POST(request) {
   try {
-    const { domain, isCascade, plantIds } = await request.json();
+    const { domain, isCascade, plantIds, apiKey } = await request.json();
 
     if (!domain) {
       return NextResponse.json(
@@ -20,8 +20,8 @@ export async function POST(request) {
       );
     }
 
-    const keys = getXApiKeys(domain);
-    if (!keys) {
+    const baseMasterKey = apiKey || getXApiKeys(domain)?.baseMasterKey;
+    if (!baseMasterKey) {
       return NextResponse.json(
         { success: false, message: `Unknown environment: ${domain}` },
         { status: 400 }
@@ -30,7 +30,6 @@ export async function POST(request) {
 
     // Build the URL from the selected environment's domain
     const url = `https://${domain}.innovapptive.com/mobilesyncapi/bootstrap/BASE_MASTER`;
-    const baseMasterKey = keys.baseMasterKey;
 
     const response = await fetch(url, {
       method: 'POST',
